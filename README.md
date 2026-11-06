@@ -6,6 +6,7 @@ Operatör ayarlarını, ölçülen sonuçlardan öğrenerek hedeflere göre öne
 - **Hedef bazlı optimizasyon:** nicel çıktılarda hedef aralık, nitel çıktılarda hedef kategori (Optuna TPE)
 - **Etki analizi:** girdi önemi, duyarlılık, korelasyon
 - **Google Sheets:** veriler, model durumu ve etki analizi tabloya yazılır
+- **Çoklu çalışma:** her çalışma aynı dosyada kendi sayfalarıyla; uygulamadan oluşturulur ve seçilir
 
 | Dosya | İçerik |
 |---|---|
@@ -13,5 +14,6 @@ Operatör ayarlarını, ölçülen sonuçlardan öğrenerek hedeflere göre öne
 | `engine.py` | Modeller, optimizasyon, etki analizi |
 | `plots.py` | Grafikler ve sonuç tabloları |
 | `store.py` | Google Sheets / yerel depolama |
+| `calismalar.py` | Birden fazla çalışmanın sayfa yönetimi |
 
 Kurulum: `KURULUM.md`

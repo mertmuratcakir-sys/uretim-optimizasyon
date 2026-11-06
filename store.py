@@ -1,16 +1,17 @@
 """
 store.py — Depolama katmanı
 ============================
-GOOGLE_CREDENTIALS ortam değişkeni (Service Account JSON) varsa Google Sheets,
-yoksa yerel CSV dosyaları kullanılır (deneme amaçlı — Hugging Face'te kalıcı değildir).
+GOOGLE_CREDENTIALS (Service Account JSON) ve SHEET_ID tanımlıysa Google Sheets,
+yoksa yerel CSV dosyaları kullanılır (deneme amaçlı — bulutta kalıcı değildir).
+
+Her iki depo da sekme (sayfa) adıyla çalışır: oku / yaz / baslik_yaz / ekle /
+sekmeler / olustur / sekme_sil / url.
 """
 from __future__ import annotations
 
 import csv
 import json
 import os
-
-SEKMELER = ["Yapilanma", "Veriler", "Tahminler", "Model_Durumu", "Etki_Analizi"]
 
 
 class SheetsDepo:
@@ -25,28 +26,58 @@ class SheetsDepo:
             bilgi, scopes=["https://www.googleapis.com/auth/spreadsheets",
                            "https://www.googleapis.com/auth/drive"])
         self.servis_hesabi = bilgi.get("client_email", "")
+        self.sheet_id = sheet_id
         self.sh = gspread.authorize(kimlik).open_by_key(sheet_id)
         self.baslik = self.sh.title
         self._ws = {}
 
-    def _sekme(self, ad):
+    def _yenile(self):
+        self._ws = {w.title: w for w in self.sh.worksheets()}
+
+    def _sekme(self, ad, olustur=True):
         if ad not in self._ws:
-            mevcut = {w.title: w for w in self.sh.worksheets()}
-            self._ws[ad] = mevcut.get(ad) or self.sh.add_worksheet(title=ad, rows=1000, cols=40)
-        return self._ws[ad]
+            self._yenile()
+        if ad not in self._ws and olustur:
+            self._ws[ad] = self.sh.add_worksheet(title=ad, rows=300, cols=30)
+        return self._ws.get(ad)
+
+    def sekmeler(self) -> list[str]:
+        self._yenile()
+        return list(self._ws)
+
+    def olustur(self, ad):
+        self._sekme(ad)
+
+    def sekme_sil(self, ad):
+        ws = self._sekme(ad, olustur=False)
+        if ws is not None:
+            self.sh.del_worksheet(ws)
+            self._ws.pop(ad, None)
+
+    def url(self, ad=None):
+        base = f"https://docs.google.com/spreadsheets/d/{self.sheet_id}/edit"
+        ws = self._sekme(ad, olustur=False) if ad else None
+        return f"{base}#gid={ws.id}" if ws is not None else base
 
     def oku(self, ad) -> list[list]:
-        return self._sekme(ad).get_all_values()
+        ws = self._sekme(ad, olustur=False)
+        return ws.get_all_values() if ws is not None else []
 
     def yaz(self, ad, satirlar: list[list]):
         ws = self._sekme(ad)
         ws.clear()
         if satirlar:
+            genislik = max((len(r) for r in satirlar), default=1)
+            if ws.col_count < genislik or ws.row_count < len(satirlar):
+                ws.resize(rows=max(ws.row_count, len(satirlar) + 50),
+                          cols=max(ws.col_count, genislik))
             ws.update(range_name="A1", values=satirlar, value_input_option="USER_ENTERED")
 
     def baslik_yaz(self, ad, baslik: list):
-        self._sekme(ad).update(range_name="A1", values=[baslik],
-                               value_input_option="USER_ENTERED")
+        ws = self._sekme(ad)
+        if ws.col_count < len(baslik):
+            ws.resize(cols=len(baslik))
+        ws.update(range_name="A1", values=[baslik], value_input_option="USER_ENTERED")
 
     def ekle(self, ad, satir: list):
         self._sekme(ad).append_row(satir, value_input_option="USER_ENTERED")
@@ -63,6 +94,20 @@ class YerelDepo:
 
     def _yol(self, ad):
         return os.path.join(self.klasor, f"{ad}.csv")
+
+    def sekmeler(self):
+        return sorted(f[:-4] for f in os.listdir(self.klasor) if f.endswith(".csv"))
+
+    def olustur(self, ad):
+        if not os.path.exists(self._yol(ad)):
+            self.yaz(ad, [])
+
+    def sekme_sil(self, ad):
+        if os.path.exists(self._yol(ad)):
+            os.remove(self._yol(ad))
+
+    def url(self, ad=None):
+        return None
 
     def oku(self, ad):
         if not os.path.exists(self._yol(ad)):

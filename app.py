@@ -1,6 +1,8 @@
 """
 Üretim Ayar Optimizasyonu — Streamlit arayüzü (Streamlit Community Cloud)
 =========================================================================
+Birden fazla çalışma: her biri aynı Google Sheets dosyasında kendi sayfalarına sahip.
+
 Gizli bilgiler (App → Settings → Secrets):
   GOOGLE_CREDENTIALS  Service Account JSON anahtarının tamamı (''' ''' içinde)
   SHEET_ID            Google Sheets dosya kimliği
@@ -42,6 +44,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import calismalar as CL
 import engine as E
 import plots as G
 from store import depo_ac
@@ -71,19 +74,8 @@ if not giris_kontrol():
 
 
 # ════════════════════════════════════════════════════════════════
-# Paylaşılan durum (tüm kullanıcılar için tek model)
+# Örnek çalışma (deneme modu ve "örnek veriyle başla" için)
 # ════════════════════════════════════════════════════════════════
-@st.cache_resource
-def paylasilan():
-    depo, uyari = depo_ac()
-    return {"depo": depo, "uyari": uyari, "kilit": threading.Lock(),
-            "yapi": None, "df": None, "model": None, "guven": None,
-            "etki": None, "log": ""}
-
-
-P = paylasilan()
-DEPO = P["depo"]
-
 ORNEK_YAPI = [
     E.YAPI_SUTUNLAR,
     ["GİRDİ", "Akim_kA", "nicel", 8, 16, "", "", "", ""],
@@ -112,14 +104,97 @@ def ornek_veri(n=40, tohum=7):
     return rows
 
 
+# ════════════════════════════════════════════════════════════════
+# Paylaşılan durum: bağlantı, çalışma dizini, çalışma başına model
+# ════════════════════════════════════════════════════════════════
+@st.cache_resource
+def paylasilan():
+    depo, uyari = depo_ac()
+    return {"depo": depo, "uyari": uyari, "kilit": threading.Lock(),
+            "dizin": None, "durum": {}}
+
+
+PG = paylasilan()
+KOK = PG["depo"]
+
+
+def dizin(yenile=False):
+    with PG["kilit"]:
+        if PG["dizin"] is None or yenile:
+            kayitlar = CL.oku(KOK)
+            if not kayitlar and KOK.tur.startswith("Yerel"):
+                CL.olustur(KOK, [], "Ornek_punta", "Örnek punta kaynağı verisi",
+                           ORNEK_YAPI, ornek_veri())
+                kayitlar = CL.oku(KOK)
+            PG["dizin"] = kayitlar
+        return PG["dizin"]
+
+
+def yeni_durum():
+    return {"kilit": threading.Lock(), "yapi": None, "df": None, "veri_rows": None,
+            "model": None, "guven": None, "etki": None, "log": ""}
+
+
+# ════════════════════════════════════════════════════════════════
+# Çalışma seçimi
+# ════════════════════════════════════════════════════════════════
+try:
+    KAYITLAR = dizin()
+    DIZIN_HATA = ""
+except Exception as e:
+    KAYITLAR, DIZIN_HATA = [], f"{type(e).__name__}: {e}"
+ADLAR = [k["Ad"] for k in KAYITLAR]
+
+st.title("⚙️ Üretim Ayar Optimizasyonu")
+if PG["uyari"]:
+    st.warning(PG["uyari"])
+if DIZIN_HATA:
+    st.error(f"Çalışma listesi okunamadı: {DIZIN_HATA}")
+
+OTURUM_ANAHTARLARI = ("sonuc", "uygula", "yapi_df", "yapi_editor")
+
+
+def oturum_temizle():
+    for k in list(st.session_state.keys()):
+        if k in OTURUM_ANAHTARLARI or k.startswith(("t_", "v_")):
+            del st.session_state[k]
+
+
+if "aktif_bekleyen" in st.session_state:  # oluştur/sil sonrası seçim (widget'tan önce)
+    b = st.session_state.pop("aktif_bekleyen")
+    if b:
+        st.session_state["aktif"] = b
+    else:
+        st.session_state.pop("aktif", None)
+        st.query_params.clear()
+
+if ADLAR:
+    if st.session_state.get("aktif") not in ADLAR:
+        istenen = st.query_params.get("c")
+        st.session_state["aktif"] = istenen if istenen in ADLAR else ADLAR[0]
+    aktif = st.selectbox("Çalışma", ADLAR, key="aktif",
+                         help="Yeni çalışma açmak için 🗂 Çalışmalar sekmesine gidin.")
+    if st.session_state.get("_onceki") != aktif:
+        if st.session_state.get("_onceki") is not None:
+            oturum_temizle()
+        st.session_state["_onceki"] = aktif
+    if st.query_params.get("c") != aktif:
+        st.query_params["c"] = aktif
+    KAYIT = next(k for k in KAYITLAR if k["Ad"] == aktif)
+    DEPO = CL.Calisma(KOK, KAYIT)
+    P = PG["durum"].setdefault(aktif, yeni_durum())
+else:
+    aktif, KAYIT, DEPO = None, None, None
+    P = yeni_durum()
+
+
+# ════════════════════════════════════════════════════════════════
+# Veri yükleme / eğitim (aktif çalışma)
+# ════════════════════════════════════════════════════════════════
 def yukle():
-    rows = DEPO.oku("Yapilanma")
-    if (not rows or len(rows) < 2) and DEPO.tur.startswith("Yerel"):
-        DEPO.yaz("Yapilanma", ORNEK_YAPI)
-        DEPO.yaz("Veriler", ornek_veri())
-        rows = ORNEK_YAPI
-    P["yapi"] = E.yapi_oku(rows)
-    P["df"] = E.veri_oku(DEPO.oku("Veriler"), P["yapi"])
+    P["yapi"] = E.yapi_oku(DEPO.oku("Yapilanma"))
+    P["veri_rows"] = DEPO.oku("Veriler")
+    P["df"] = E.veri_oku(P["veri_rows"], P["yapi"])
 
 
 def egit_hepsi():
@@ -145,7 +220,7 @@ def egit_hepsi():
             try:
                 DEPO.yaz("Model_Durumu", E.durum_satirlari(model, yapi, P["guven"]))
             except Exception as e:
-                log.append(f"⚠️ Model_Durumu yazılamadı: {e}")
+                log.append(f"⚠️ Model sayfası yazılamadı: {e}")
             try:
                 onem = E.onem_hesapla(model)
                 duy = E.duyarlilik_hesapla(model, yapi)
@@ -182,11 +257,8 @@ def bildir(anahtar):
         (st.error if m.startswith("❌") else st.success)(m)
 
 
-# ════════════════════════════════════════════════════════════════
-# İlk yükleme
-# ════════════════════════════════════════════════════════════════
-if P["yapi"] is None:
-    with st.spinner("Veriler okunuyor ve modeller yarışıyor..."):
+if DEPO is not None and P["yapi"] is None:
+    with st.spinner(f"'{aktif}' okunuyor ve modeller yarışıyor..."):
         try:
             yukle()
             if len(P["df"]) >= E.MIN_KAYIT:
@@ -197,26 +269,24 @@ if P["yapi"] is None:
 
 YAPI = P["yapi"] or {"girdiler": [], "ciktilar": []}
 
-# ════════════════════════════════════════════════════════════════
-# Başlık
-# ════════════════════════════════════════════════════════════════
-st.title("⚙️ Üretim Ayar Optimizasyonu")
-st.caption("5 model yarışır (GP · RF · XGBoost · Lojistik · SVM), "
-           "Optuna hedeflere en yakın ayarı bulur.")
-if P["uyari"]:
-    st.warning(P["uyari"])
-gv = P["guven"]
-if gv:
-    ort = f" · ortalama skor {gv['ortalama']:.2f}" if gv["ortalama"] is not None else ""
-    st.markdown(f"**{DEPO.tur}** · Model: {gv['durum']} · {gv['n']} kayıt "
-                f"({gv['zaman']}){ort}")
+# ── Durum satırı ────────────────────────────────────────────────
+if DEPO is not None:
+    gv = P["guven"]
+    if gv:
+        ort = f" · ortalama skor {gv['ortalama']:.2f}" if gv["ortalama"] is not None else ""
+        durum = f"Model: {gv['durum']} · {gv['n']} kayıt ({gv['zaman']}){ort}"
+    else:
+        n = 0 if P["df"] is None else len(P["df"])
+        durum = f"Model henüz eğitilmedi — {n} kayıt var, en az {E.MIN_KAYIT} gerekli."
+    link = DEPO.url("Veriler")
+    st.markdown(durum + (f" · [📄 Sheets'te aç]({link})" if link else ""))
+    if KAYIT.get("Aciklama"):
+        st.caption(KAYIT["Aciklama"])
 else:
-    n = 0 if P["df"] is None else len(P["df"])
-    st.markdown(f"**{DEPO.tur}** · Model henüz eğitilmedi — {n} kayıt var, "
-                f"en az {E.MIN_KAYIT} tam kayıt gerekli.")
+    st.info("Henüz çalışma yok. **🗂 Çalışmalar** sekmesinden ilk çalışmanızı oluşturun.")
 
-sek_oneri, sek_veri, sek_model, sek_etki, sek_yapi = st.tabs(
-    ["🎯 Ayar Önerisi", "📝 Veri Girişi", "📊 Model", "🔍 Etki", "⚙️ Yapı"])
+sek_oneri, sek_veri, sek_model, sek_etki, sek_yapi, sek_cal = st.tabs(
+    ["🎯 Öneri", "📝 Veri", "📊 Model", "🔍 Etki", "⚙️ Yapı", "🗂 Çalışmalar"])
 
 # ════════════════════════════════════════════════════════════════
 # 1. Ayar önerisi
@@ -225,7 +295,6 @@ with sek_oneri:
     if not YAPI["girdiler"]:
         st.info("Önce **⚙️ Yapı** sekmesinden girdi ve çıktıları tanımlayın.")
     else:
-        # Optimizasyon sonucu bir önceki çalışmada bulunduysa giriş kutularına aktar
         bekleyen = st.session_state.pop("uygula", None)
         if bekleyen:
             for k, v in bekleyen.items():
@@ -289,7 +358,7 @@ with sek_oneri:
             if opt:
                 with st.expander("Optimizasyon grafiği"):
                     ciz(G.opt_grafik(*opt))
-            if st.button("📤 Sonucu 'Tahminler' sekmesine kaydet"):
+            if st.button("📤 Sonucu 'Tahmin' sayfasına kaydet"):
                 girdi_kayit = en if en is not None else girdi
                 bas = (["Tarih", "Tür"] + [g["isim"] for g in YAPI["girdiler"]]
                        + [c["isim"] for c in YAPI["ciktilar"]] + ["Skor", "Tüm hedefler"])
@@ -317,18 +386,18 @@ with sek_oneri:
                                      f"(%{100 * r['olas'].get(c.get('hedef_kat'), 0):.0f})")
                 satir += [round(p, 1), "Evet" if tumu else "Hayır"]
                 DEPO.ekle("Tahminler", satir)
-                st.success("Tahminler sekmesine kaydedildi.")
+                st.success("Tahmin sayfasına kaydedildi.")
 
 # ════════════════════════════════════════════════════════════════
 # 2. Veri girişi
 # ════════════════════════════════════════════════════════════════
 def son_kayitlar(n=15):
-    rows = DEPO.oku("Veriler")
-    if not rows or len(rows) < 2:
+    rows = P["veri_rows"] or []
+    if len(rows) < 2:
         return pd.DataFrame(columns=rows[0] if rows else ["ID"])
     bas = rows[0]
     gov = [list(r) + [""] * (len(bas) - len(r)) for r in rows[1:]][-n:][::-1]
-    return pd.DataFrame([r[:len(bas)] for r in gov], columns=bas)
+    return pd.DataFrame([[str(x) for x in r[:len(bas)]] for r in gov], columns=bas)
 
 
 def veri_kaydet(d, yeniden_egit):
@@ -348,16 +417,19 @@ def veri_kaydet(d, yeniden_egit):
     elif any(h not in bas for h in gerekli):
         bas = bas + [h for h in gerekli if h not in bas]
         DEPO.baslik_yaz("Veriler", bas)
+        rows[0] = bas
     idler = [E.sayi(r[0]) for r in rows[1:] if r]
     yeni_id = int(max([i for i in idler if i is not None], default=0)) + 1
     d = dict(d, ID=yeni_id, Tarih=datetime.now().strftime("%d.%m.%Y %H:%M"))
-    DEPO.ekle("Veriler", [E.hucre(d.get(h)) if d.get(h) is not None else "" for h in bas])
+    satir = [E.hucre(d.get(h)) if d.get(h) is not None else "" for h in bas]
+    DEPO.ekle("Veriler", satir)
     mesaj = f"Kayıt #{yeni_id} eklendi."
     if yeniden_egit:
         egit_hepsi()
         mesaj += " Model yeniden eğitildi."
     else:
-        P["df"] = E.veri_oku(DEPO.oku("Veriler"), YAPI)
+        P["veri_rows"] = rows + [[str(x) for x in satir]]
+        P["df"] = E.veri_oku(P["veri_rows"], YAPI)
     return "✅ " + mesaj
 
 
@@ -367,7 +439,7 @@ with sek_veri:
         st.info("Önce **⚙️ Yapı** sekmesinden girdi ve çıktıları tanımlayın.")
     else:
         st.write("Denemeden sonra uyguladığınız ayarları ve ölçtüğünüz sonuçları girin. "
-                 "Google Sheets'teki **Veriler** sekmesine doğrudan da yazabilirsiniz.")
+                 f"Sheets'teki **{DEPO.sekme['Veriler']}** sayfasına doğrudan da yazabilirsiniz.")
         with st.form("veri_form", clear_on_submit=True):
             d = {}
             st.markdown("**Ayarlar (girdiler)**")
@@ -399,34 +471,35 @@ with sek_veri:
             with st.spinner("Kaydediliyor..."):
                 st.session_state["veri_mesaj"] = veri_kaydet(d, yeniden)
             st.rerun()
-    st.markdown("**Son kayıtlar**")
-    st.dataframe(son_kayitlar(), hide_index=True, use_container_width=True)
+        st.markdown("**Son kayıtlar**")
+        st.dataframe(son_kayitlar(), hide_index=True, use_container_width=True)
 
 # ════════════════════════════════════════════════════════════════
 # 3. Model
 # ════════════════════════════════════════════════════════════════
 with sek_model:
     bildir("model_mesaj")
-    c1, c2 = st.columns([3, 2])
-    if c1.button("🔄 Verileri çek ve modelleri yeniden yarıştır", type="primary",
-                 use_container_width=True):
-        with st.spinner("Modeller yarışıyor..."):
-            egit_hepsi()
-        st.session_state["model_mesaj"] = ("✅ Model güncellendi." if P["model"]
-                                           else "❌ Model kurulamadı — günlüğe bakın.")
-        st.rerun()
-    if c2.button("🔌 Bağlantıyı yenile", use_container_width=True,
-                 help="Sheets ayarlarını değiştirdiyseniz bağlantıyı baştan kurar"):
-        st.cache_resource.clear()
-        st.rerun()
-    if P["model"]:
-        st.dataframe(G.yaris_tablosu(P["model"], P["guven"]), hide_index=True,
-                     use_container_width=True)
-        ciz(G.yaris_grafik(P["model"]))
-    st.caption("R²: 1 kusursuz, 0.7 üstü iyi. Doğruluk: doğru tahmin oranı. Skorlar "
-               "modelin daha önce görmediği kayıtlar üzerinden (çapraz doğrulama) ölçülür.")
-    with st.expander("Eğitim günlüğü"):
-        st.code(P["log"] or "—", language=None)
+    if DEPO is not None:
+        c1, c2 = st.columns([3, 2])
+        if c1.button("🔄 Verileri çek ve modelleri yeniden yarıştır", type="primary",
+                     use_container_width=True):
+            with st.spinner("Modeller yarışıyor..."):
+                egit_hepsi()
+            st.session_state["model_mesaj"] = ("✅ Model güncellendi." if P["model"]
+                                               else "❌ Model kurulamadı — günlüğe bakın.")
+            st.rerun()
+        if c2.button("🔌 Bağlantıyı yenile", use_container_width=True,
+                     help="Sheets ayarlarını değiştirdiyseniz bağlantıyı baştan kurar"):
+            st.cache_resource.clear()
+            st.rerun()
+        if P["model"]:
+            st.dataframe(G.yaris_tablosu(P["model"], P["guven"]), hide_index=True,
+                         use_container_width=True)
+            ciz(G.yaris_grafik(P["model"]))
+        st.caption("R²: 1 kusursuz, 0.7 üstü iyi. Doğruluk: doğru tahmin oranı. Skorlar "
+                   "modelin daha önce görmediği kayıtlar üzerinden (çapraz doğrulama) ölçülür.")
+        with st.expander("Eğitim günlüğü"):
+            st.code(P["log"] or "—", language=None)
 
 # ════════════════════════════════════════════════════════════════
 # 4. Etki analizi
@@ -458,7 +531,7 @@ with sek_etki:
 def yapi_tablosu():
     rows = DEPO.oku("Yapilanma")
     if not rows or len(rows) < 2:
-        rows = ORNEK_YAPI
+        rows = CL.BOS_YAPI
     n = len(E.YAPI_SUTUNLAR)
     gov = [[str(x) for x in (list(r) + [""] * n)[:n]] for r in rows[1:]]
     return pd.DataFrame(gov, columns=E.YAPI_SUTUNLAR)
@@ -478,7 +551,7 @@ def yapi_kaydet(tablo, sifirla):
     if sifirla:
         DEPO.yaz("Veriler", [yeni])
         DEPO.yaz("Tahminler", [])
-        mesaj.append("Veriler ve Tahminler sekmeleri sıfırlandı.")
+        mesaj.append("Veri ve Tahmin sayfaları sıfırlandı.")
     else:
         mevcut = DEPO.oku("Veriler")
         if not mevcut:
@@ -488,7 +561,7 @@ def yapi_kaydet(tablo, sifirla):
             eksik = [h for h in yeni if h not in bas]
             if eksik:
                 DEPO.baslik_yaz("Veriler", bas + eksik)
-                mesaj.append(f"Veriler sekmesine yeni sütun eklendi: {', '.join(eksik)}. "
+                mesaj.append(f"Veri sayfasına yeni sütun eklendi: {', '.join(eksik)}. "
                              f"Eski kayıtlarda bu sütunlar boş kalır.")
     mesaj += [f"⚠️ {h}" for h in hatalar]
     P["model"] = P["guven"] = P["etki"] = None
@@ -499,35 +572,125 @@ def yapi_kaydet(tablo, sifirla):
 
 with sek_yapi:
     bildir("yapi_mesaj")
-    st.markdown(
-        "Buradan veya Sheets'teki **Yapilanma** sekmesinden düzenleyebilirsiniz.\n"
-        "- **Tür:** GİRDİ / ÇIKTI · **Tip:** nicel / nitel\n"
-        "- Nicel girdi: **Min–Max** (optimizasyon bu aralıkta arar)\n"
-        "- Nitel: **Kategoriler** virgülle, örn. `DC01,DP600`\n"
-        "- Hedef: nicel çıktıda **Hedef_Min–Hedef_Max**, nitel çıktıda **Hedef_Kategori**")
-    if "yapi_df" not in st.session_state:
-        st.session_state["yapi_df"] = yapi_tablosu()
-    duzen = st.data_editor(
-        st.session_state["yapi_df"], key="yapi_editor", num_rows="dynamic",
-        hide_index=True, use_container_width=True,
-        column_config={
-            "Tür": st.column_config.SelectboxColumn(options=["GİRDİ", "ÇIKTI"], required=True),
-            "Tip": st.column_config.SelectboxColumn(options=["nicel", "nitel"], required=True),
-        })
-    sifirla = st.checkbox("Veriler sekmesini sıfırla (TÜM kayıtlar silinir)")
-    c1, c2 = st.columns(2)
-    if c1.button("💾 Yapıyı kaydet", type="primary", use_container_width=True):
-        with st.spinner("Kaydediliyor ve model yeniden eğitiliyor..."):
-            try:
-                st.session_state["yapi_mesaj"] = yapi_kaydet(duzen, sifirla)
-            except Exception as e:
-                st.session_state["yapi_mesaj"] = f"❌ {type(e).__name__}: {e}"
-        if not st.session_state["yapi_mesaj"].startswith("❌"):
+    if DEPO is None:
+        st.info("Önce bir çalışma oluşturun.")
+    else:
+        st.markdown(
+            f"Buradan veya Sheets'teki **{DEPO.sekme['Yapilanma']}** sayfasından "
+            "düzenleyebilirsiniz.\n"
+            "- **Tür:** GİRDİ / ÇIKTI · **Tip:** nicel / nitel\n"
+            "- Nicel girdi: **Min–Max** (optimizasyon bu aralıkta arar)\n"
+            "- Nitel: **Kategoriler** virgülle, örn. `DC01,DP600`\n"
+            "- Hedef: nicel çıktıda **Hedef_Min–Hedef_Max**, nitel çıktıda **Hedef_Kategori**")
+        if "yapi_df" not in st.session_state:
+            st.session_state["yapi_df"] = yapi_tablosu()
+        duzen = st.data_editor(
+            st.session_state["yapi_df"], key="yapi_editor", num_rows="dynamic",
+            hide_index=True, use_container_width=True,
+            column_config={
+                "Tür": st.column_config.SelectboxColumn(options=["GİRDİ", "ÇIKTI"],
+                                                        required=True),
+                "Tip": st.column_config.SelectboxColumn(options=["nicel", "nitel"],
+                                                        required=True),
+            })
+        sifirla = st.checkbox("Veri sayfasını sıfırla (bu çalışmanın TÜM kayıtları silinir)")
+        c1, c2 = st.columns(2)
+        if c1.button("💾 Yapıyı kaydet", type="primary", use_container_width=True):
+            with st.spinner("Kaydediliyor ve model yeniden eğitiliyor..."):
+                try:
+                    st.session_state["yapi_mesaj"] = yapi_kaydet(duzen, sifirla)
+                except Exception as e:
+                    st.session_state["yapi_mesaj"] = f"❌ {type(e).__name__}: {e}"
+            if not st.session_state["yapi_mesaj"].startswith("❌"):
+                st.session_state.pop("yapi_df", None)
+                st.session_state.pop("yapi_editor", None)
+            st.rerun()
+        if c2.button("↩ Sheets'ten yeniden yükle", use_container_width=True):
+            P["model"] = P["guven"] = P["etki"] = None
+            egit_hepsi()
             st.session_state.pop("yapi_df", None)
             st.session_state.pop("yapi_editor", None)
+            st.rerun()
+
+# ════════════════════════════════════════════════════════════════
+# 6. Çalışmalar
+# ════════════════════════════════════════════════════════════════
+with sek_cal:
+    bildir("cal_mesaj")
+    if KAYITLAR:
+        st.markdown(f"**{len(KAYITLAR)} çalışma** — hepsi *{KOK.baslik}* dosyasında, "
+                    "her biri kendi sayfalarıyla.")
+        st.dataframe(pd.DataFrame([{"Çalışma": k["Ad"], "Açıklama": k.get("Aciklama", ""),
+                                    "Oluşturma": k.get("Olusturma", ""),
+                                    "Veri sayfası": k["Veriler"]} for k in KAYITLAR]),
+                     hide_index=True, use_container_width=True)
+        st.caption("Tarayıcı adresi seçili çalışmayı içerir (…?c=Ad). Her çalışma için "
+                   "iPhone ana ekranına ayrı kısayol ekleyebilirsiniz.")
+
+    st.subheader("➕ Yeni çalışma")
+    with st.form("yeni_calisma", clear_on_submit=True):
+        y_ad = st.text_input("Çalışma adı", placeholder="örn. K5_punta_DP600",
+                             help="2–30 karakter; harf, rakam, boşluk, - ve _")
+        y_acik = st.text_input("Açıklama (isteğe bağlı)",
+                               placeholder="örn. K5 hattı, DP600 sac, 1.2 mm")
+        secenekler = ["Boş (yapıyı sonra tanımlarım)"]
+        if KAYITLAR:
+            secenekler.append("Mevcut bir çalışmanın yapısını kopyala")
+        secenekler.append("Örnek veriyle (punta kaynağı demo)")
+        y_sablon = st.radio("Başlangıç", secenekler)
+        y_kaynak = (st.selectbox("Yapısı kopyalanacak çalışma", ADLAR,
+                                 index=ADLAR.index(aktif) if aktif in ADLAR else 0)
+                    if KAYITLAR else None)
+        st.caption("Kopyalamada sadece girdi/çıktı tanımları ve hedefler alınır, kayıtlar alınmaz.")
+        y_btn = st.form_submit_button("Oluştur", type="primary", use_container_width=True)
+    if y_btn:
+        try:
+            with st.spinner("Sayfalar oluşturuluyor..."):
+                with PG["kilit"]:
+                    mevcut = CL.oku(KOK)
+                    if y_sablon.startswith("Mevcut"):
+                        kaynak = next(k for k in mevcut if k["Ad"] == y_kaynak)
+                        yapi_rows = KOK.oku(kaynak["Yapilanma"])
+                        yeni = CL.olustur(KOK, mevcut, y_ad, y_acik, yapi_rows)
+                    elif y_sablon.startswith("Örnek"):
+                        yeni = CL.olustur(KOK, mevcut, y_ad, y_acik, ORNEK_YAPI, ornek_veri())
+                    else:
+                        yeni = CL.olustur(KOK, mevcut, y_ad, y_acik)
+                    PG["dizin"] = None
+            st.session_state["aktif_bekleyen"] = yeni["Ad"]
+            st.session_state["cal_mesaj"] = (f"✅ '{yeni['Ad']}' oluşturuldu ve seçildi. "
+                                             "Yapıyı ⚙️ Yapı sekmesinden düzenleyin.")
+        except ValueError as e:
+            st.session_state["cal_mesaj"] = f"❌ {e}"
+        except Exception as e:
+            st.session_state["cal_mesaj"] = f"❌ {type(e).__name__}: {e}"
         st.rerun()
-    if c2.button("↩ Sheets'ten yeniden yükle", use_container_width=True):
-        yukle()
-        st.session_state.pop("yapi_df", None)
-        st.session_state.pop("yapi_editor", None)
+
+    if KAYITLAR:
+        with st.expander("🗑 Çalışma sil"):
+            if st.session_state.get("sil_secim") not in ADLAR:
+                st.session_state.pop("sil_secim", None)
+            s_ad = st.selectbox("Silinecek çalışma", ADLAR, key="sil_secim")
+            s_onay = st.text_input("Onay için çalışmanın adını aynen yazın", key="sil_onay")
+            st.caption("Çalışmanın 5 sayfası Sheets dosyasından kalıcı olarak silinir. "
+                       "Gerekirse önce Sheets'te Dosya → Kopya oluştur ile yedek alın.")
+            if st.button("Kalıcı olarak sil", type="secondary"):
+                if s_onay.strip() != s_ad:
+                    st.session_state["cal_mesaj"] = "❌ Ad eşleşmedi, silinmedi."
+                else:
+                    try:
+                        with PG["kilit"]:
+                            CL.sil(KOK, CL.oku(KOK), s_ad)
+                            PG["dizin"] = None
+                            PG["durum"].pop(s_ad, None)
+                        st.session_state["cal_mesaj"] = f"✅ '{s_ad}' silindi."
+                        if st.session_state.get("aktif") == s_ad:
+                            st.session_state["aktif_bekleyen"] = None
+                    except Exception as e:
+                        st.session_state["cal_mesaj"] = f"❌ {type(e).__name__}: {e}"
+                st.rerun()
+
+    if st.button("↻ Çalışma listesini yenile",
+                 help="Başka bir cihazdan çalışma eklediyseniz listeyi yeniler"):
+        PG["dizin"] = None
         st.rerun()
