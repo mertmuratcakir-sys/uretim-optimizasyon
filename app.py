@@ -288,6 +288,10 @@ if DEPO is not None:
         DU.banner(st, P, YAPI)
     except Exception:
         pass
+    try:
+        DU.kenar(st, P, YAPI)
+    except Exception as e:
+        st.sidebar.caption(f"DOE asistanı: {e}")
 else:
     st.info("Henüz çalışma yok. **🗂 Çalışmalar** sekmesinden ilk çalışmanızı oluşturun.")
 

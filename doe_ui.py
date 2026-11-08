@@ -15,6 +15,7 @@ import pandas as pd
 
 import doe_analiz as A
 import doe_plots as DP
+import doe_tani as DT
 import doe_tasarim as T
 
 
@@ -87,10 +88,10 @@ def banner(st, P, YAPI):
                     "eksik deneyler tamamlandıkça sonuçlar güçlenir.")
         else:
             st.caption(f"🧪 DOE: {tam}/{n} deney sonuçlandı.")
-    elif P.get("df") is not None and len(P["df"]):
-        m = A.veri_uygun_mu(P["df"], YAPI)
-        if m:
-            st.info("🧪 " + m)
+    t = tani_al(P, YAPI)
+    if t and DT.ozet_mesaj(t) and not st.session_state.get("doe_oto"):
+        st.info("🧪 " + DT.ozet_mesaj(t) + " Yan paneldeki **🧪 DOE asistanı**ndan "
+                "tek tuşla uygulayabilirsiniz.")
 
 
 def min_deney(meta, sat):
@@ -197,7 +198,10 @@ def goster(st, ctx):
     if m:
         (st.error if m.startswith("❌") else st.success)(m)
     ctx = {**ctx, "sec": _secili_faktorler(st, YAPI)}
-    s1, s2, s3, s4, s5 = st.tabs(["Uygunluk", "Tasarım", "Deneyler", "Analiz", "Optimizasyon"])
+    s0, s1, s2, s3, s4, s5 = st.tabs(["🤖 Otomatik", "Uygunluk", "Tasarım", "Deneyler",
+                                      "Analiz", "Optimizasyon"])
+    with s0:
+        _otomatik(st, ctx)
     with s1:
         _uygunluk(st, ctx)
     with s2:
@@ -234,9 +238,10 @@ def _uygunluk(st, ctx):
                                for r in rows]).astype(str),
                  hide_index=True, use_container_width=True)
     st.caption("✅ uygun · ⚠️ kullanılabilir ama dikkat · ❌ bu faktör yapısıyla kurulamaz")
-    m = A.veri_uygun_mu(P["df"], YAPI) if P.get("df") is not None else None
+    t = tani_al(P, YAPI)
+    m = DT.ozet_mesaj(t) if t else None
     if m:
-        st.info(m)
+        st.info("Mevcut kayıtlar: " + m + " → **🤖 Otomatik** sekmesi.")
 
 
 # ── 2. Tasarım ──────────────────────────────────────────────────
@@ -571,6 +576,11 @@ def _kaynak(st, ctx):
     if k == "plan":
         doe = P["doe"]
         return k, doe["meta"], plan_satirlari(doe)
+    t = tani_al(P, YAPI)
+    uy = [a for a in (t or {}).get("adaylar", []) if a["uygun"]]
+    if uy:
+        st.caption(f"Veriler sayfası **{uy[0]['ad']}** olarak tanındı ({uy[0]['ozet']}).")
+        return k, uy[0]["meta"], uy[0]["satirlar"]
     return k, ozel_meta(YAPI), ozel_satirlar(P["df"], YAPI)
 
 
@@ -686,7 +696,7 @@ def _parametre(meta, sat, terimler):
         return len(terimler) + 1
 
 
-def _sonuc_goster(st, s, YAPI):
+def _sonuc_goster(st, s, YAPI, on=""):
     meta = s["meta"]
     aile = A._aile(meta)
     st.markdown(f"### {s['yanit']} — {meta['ad']}")
@@ -745,15 +755,15 @@ def _sonuc_goster(st, s, YAPI):
         with st.expander("🗺 Kontur ve yüzey grafikleri"):
             adlar = [f["isim"] for f in surekli]
             c1, c2 = st.columns(2)
-            x = c1.selectbox("X ekseni", adlar, index=0, key="doe_kx")
-            y = c2.selectbox("Y ekseni", [a for a in adlar if a != x], index=0, key="doe_ky")
+            x = c1.selectbox("X ekseni", adlar, index=0, key=f"{on}doe_kx")
+            y = c2.selectbox("Y ekseni", [a for a in adlar if a != x], index=0, key=f"{on}doe_ky")
             sabit = {}
             for f in meta["faktorler"]:
                 if f["isim"] in (x, y):
                     continue
                 if A._kategorik(meta, f):
                     L = A._seviyeler(meta, f)
-                    sabit[f["isim"]] = st.selectbox(f"{f['isim']} (sabit)", L, key=f"doe_ks_{f['isim']}",
+                    sabit[f["isim"]] = st.selectbox(f"{f['isim']} (sabit)", L, key=f"{on}doe_ks_{f['isim']}",
                                                     format_func=A.seviye_yaz)
                 else:
                     sabit[f["isim"]] = f["merkez"]
@@ -880,3 +890,175 @@ def _optimizasyon(st, ctx):
         st.session_state["doe_mesaj"] = ("✅ Ayar 🎯 Öneri sekmesine aktarıldı — orada 5 ML modeliyle "
                                          "de tahmin edebilirsiniz.")
         st.rerun()
+
+
+# ════════════════════════════════════════════════════════════════
+# 🤖 Otomatik DOE: mevcut kayıtlardan tasarım tanıma ve uygulama
+# ════════════════════════════════════════════════════════════════
+def tani_al(P, YAPI):
+    """Veriler sayfası değişmedikçe tanıma sonucunu önbellekten verir."""
+    df = P.get("df")
+    if df is None or not len(df) or not YAPI["girdiler"]:
+        return None
+    anahtar = (len(P.get("veri_rows") or []), hash(str(P.get("veri_rows"))),
+               hash(str(YAPI)))
+    onb = P.get("doe_tani")
+    if onb and onb[0] == anahtar:
+        return onb[1]
+    try:
+        t = DT.tani(df, YAPI)
+    except Exception:
+        t = None
+    P["doe_tani"] = (anahtar, t)
+    return t
+
+
+def _oto_calistir(st, YAPI, aday):
+    with st.spinner(f"{aday['ad']} uygulanıyor..."):
+        st.session_state["doe_oto"] = DT.uygula(aday, YAPI)
+    st.session_state["doe_acik"] = True
+    st.session_state["doe_mesaj"] = (f"✅ {aday['ad']} kayıtlı verilere uygulandı — sonuçlar "
+                                     "**🧪 DOE → 🤖 Otomatik** sekmesinde.")
+    st.rerun()
+
+
+def _aday_satiri(st, a, anahtar, YAPI):
+    cik = ", ".join(f"{c['isim']} ({c['n']} sonuç)" for c in a["ciktilar"] if c["uygun"])
+    yetersiz = [c["isim"] for c in a["ciktilar"] if not c["uygun"]]
+    st.markdown(f"**{a['ad']}**  \n{a['ozet']}")
+    st.caption(("Analiz edilecek çıktılar: " + cik) if cik else "Analiz için yeterli sonuç yok.")
+    if yetersiz:
+        st.caption("Yetersiz sonuç: " + ", ".join(yetersiz))
+    if a["uygun"] and st.button("▶ Otomatik uygula", key=f"{anahtar}_{a['kod']}",
+                                type="primary" if a.get("onerilen") else "secondary",
+                                use_container_width=True):
+        _oto_calistir(st, YAPI, a)
+
+
+def _uygun_adaylar(t):
+    uy = [a for a in t["adaylar"] if a["uygun"]]
+    if uy:
+        uy[0]["onerilen"] = True
+    return uy
+
+
+def kenar(st, P, YAPI):
+    """Yan panel: DOE asistanı."""
+    t = tani_al(P, YAPI)
+    with st.sidebar:
+        st.markdown("### 🧪 DOE asistanı")
+        if not t or not t["adaylar"]:
+            n = 0 if P.get("df") is None else len(P["df"])
+            st.caption(f"Veriler sayfasında {n} kayıt var. En az 4 eksiksiz kayıt olunca "
+                       "kayıtların hangi deney tasarımına uyduğu burada gösterilir.")
+            return
+        uy = _uygun_adaylar(t)
+        m = DT.ozet_mesaj(t)
+        if m:
+            st.success(m)
+        else:
+            st.warning("Kayıtlar henüz otomatik DOE analizi için yeterli değil.")
+        if t["sabitler"]:
+            st.caption("Sabit kalan girdiler: " + ", ".join(f"{k} = {A.seviye_yaz(v)}"
+                                                            for k, v in t["sabitler"].items()))
+        for a in uy:
+            st.divider()
+            _aday_satiri(st, a, "doe_k", YAPI)
+        if t["nitel_ciktilar"]:
+            st.caption("Nitel çıktılar (" + ", ".join(t["nitel_ciktilar"]) + ") DOE regresyonuna "
+                       "alınmaz; 🎯 Öneri modelleri bunları kullanır.")
+        with st.expander("Uymayan tasarımlar ve nedenleri"):
+            for kod, neden in t["reddedilen"]:
+                st.caption(f"✗ {T.TASARIM_ADLARI.get(kod, kod) if kod != 'faktoriyel' else '2 seviyeli faktöriyel / PB'}: {neden}")
+
+
+def _minitab_csv(sonuc):
+    meta = sonuc["meta"]
+    fis = [f["isim"] for f in meta["faktorler"]]
+    yan = list(meta["ciktilar"])
+    sat = None
+    for s in sonuc["sonuclar"].values():
+        sat = s["satirlar"]
+        break
+    sat = sat or []
+    pt_ad = meta.get("pt_sutun") or "PtType"
+    rows = [["StdOrder", "RunOrder", pt_ad, "Blocks"] + fis + yan]
+    for s in sat:
+        rows.append([s["StdOrder"], s["RunOrder"], s["pt"], s["blok"]]
+                    + [A.seviye_yaz(s["deg"][f]) for f in fis]
+                    + ["" if s["y"].get(c) is None or (isinstance(s["y"].get(c), float)
+                                                        and np.isnan(s["y"].get(c)))
+                       else s["y"].get(c) for c in yan])
+    import csv
+    import io
+    b = io.StringIO()
+    csv.writer(b).writerows(rows)
+    return b.getvalue().encode("utf-8-sig")
+
+
+def _otomatik(st, ctx):
+    P, YAPI = ctx["P"], ctx["YAPI"]
+    t = tani_al(P, YAPI)
+    st.caption("Veriler sayfasındaki mevcut kayıtlar incelenir; yeni deney veya sonuç girmeniz "
+               "gerekmez. Kayıtlar bir deney tasarımına uyuyorsa o tasarımla analiz edilir ve "
+               "⚙️ Yapı'daki hedeflere göre optimum ayar bulunur.")
+    if t and t["adaylar"]:
+        m = DT.ozet_mesaj(t)
+        (st.success if m else st.warning)(m or "Kayıtlar henüz otomatik analiz için yeterli değil.")
+        uy = _uygun_adaylar(t)
+        if uy:
+            kol = st.columns(min(3, len(uy)))
+            for i, a in enumerate(uy):
+                with kol[i % len(kol)]:
+                    _aday_satiri(st, a, "doe_o", YAPI)
+    else:
+        st.info("Veriler sayfasında otomatik analiz için en az 4 eksiksiz kayıt gerekir.")
+    o = st.session_state.get("doe_oto")
+    if not o:
+        return
+    st.divider()
+    meta = o["meta"]
+    st.markdown(f"## {o['aday']['ad']}")
+    st.caption(f"{o['aday']['ozet']} · kaynak: Veriler sayfası"
+               + (" · sabit: " + ", ".join(f"{k} = {A.seviye_yaz(v)}" for k, v in meta["sabitler"].items())
+                  if meta.get("sabitler") else ""))
+    for h in o["hatalar"]:
+        st.warning(h)
+    st.download_button("⬇ Minitab çalışma sayfası (CSV)", _minitab_csv(o),
+                       file_name=f"DOE_{meta['tip']}.csv", mime="text/csv", key="doe_oto_csv")
+    opt = o.get("opt")
+    if opt:
+        st.markdown("### 🎯 Optimum ayar (Response Optimizer)")
+        (st.success if opt["D"] > 0.9 else st.info if opt["D"] > 0.5 else st.warning)(
+            f"Birleşik istenebilirlik D = {opt['D']:.3f}"
+            + (" — tüm hedefler sağlanıyor." if opt["D"] > 0.999 else ""))
+        st.dataframe(pd.DataFrame([{"Faktör": k, "Değer": A.seviye_yaz(v)} for k, v in opt["ayar"].items()]
+                                  + [{"Faktör": f"{k} (sabit)", "Değer": A.seviye_yaz(v)}
+                                     for k, v in meta.get("sabitler", {}).items()]),
+                     hide_index=True, use_container_width=True)
+        st.dataframe(_tablo(opt["tablo"], ["Yanıt", "Uyum", "SE Uyum", "%95 GA", "%95 TA", "Hedef",
+                                           "İstenebilirlik"]), hide_index=True, use_container_width=True)
+        if st.button("➡ Bu ayarı 🎯 Öneri sekmesine aktar", key="doe_oto_akt", type="primary"):
+            st.session_state["uygula"] = {**{k: (float(v) if isinstance(v, (int, float, np.floating)) else v)
+                                             for k, v in opt["ayar"].items()}, **meta.get("sabitler", {})}
+            st.session_state["doe_mesaj"] = "✅ Ayar 🎯 Öneri sekmesine aktarıldı."
+            st.rerun()
+    for y, ta in o.get("taguchi", {}).items():
+        st.markdown(f"### Taguchi — {y} · {A.SN_ADLARI[ta['hedef']]}")
+        st.dataframe(pd.DataFrame(A.taguchi_yanit_tablosu(ta, "SN")).astype(str), hide_index=True,
+                     use_container_width=True)
+        st.caption("S/N için yanıt tablosu · ortalamalar:")
+        st.dataframe(pd.DataFrame(A.taguchi_yanit_tablosu(ta, "Ort")).astype(str), hide_index=True,
+                     use_container_width=True)
+        st.info("S/N'yi en büyükleyen seviyeler: "
+                + ", ".join(f"{k} = {A.seviye_yaz(v)}" for k, v in ta["en_iyi"].items())
+                + f" → tahmini ortalama {ta['tahmin']['Ort']:.4g}")
+        for fig in DP.taguchi_grafik(ta):
+            ciz(st, fig)
+    if o["sonuclar"]:
+        st.markdown("### Analiz sonuçları")
+        adlar = list(o["sonuclar"])
+        sekmeler = st.tabs(adlar) if len(adlar) > 1 else [st.container()]
+        for ad, sek in zip(adlar, sekmeler):
+            with sek:
+                _sonuc_goster(st, o["sonuclar"][ad], YAPI, on=f"oto_{ad}_")
