@@ -3,6 +3,8 @@ calismalar.py — Birden fazla çalışmayı aynı Google Sheets dosyasında yö
 =============================================================================
 'Calismalar' sayfası dizin görevi görür. Her çalışmanın kendi 5 sayfası vardır:
   <Ad>_Yapi · <Ad>_Veriler · <Ad>_Tahmin · <Ad>_Model · <Ad>_Etki
+DOE tasarımı oluşturulursa ayrıca <Ad>_DOE (Minitab çalışma sayfası) ve
+<Ad>_DOE_Bilgi (tasarım bilgisi) sayfaları açılır.
 Sayfa adları dizinde açıkça tutulur; böylece eski tek-çalışmalı düzen
 (Yapilanma, Veriler, ...) de bir çalışma olarak kullanılabilir.
 """
@@ -14,10 +16,12 @@ from datetime import datetime
 import engine as E
 
 DIZIN = "Calismalar"
-MANTIKSAL = ["Yapilanma", "Veriler", "Tahminler", "Model_Durumu", "Etki_Analizi"]
+TEMEL = ["Yapilanma", "Veriler", "Tahminler", "Model_Durumu", "Etki_Analizi"]
+DOE = ["DOE", "DOE_Bilgi"]  # sadece DOE tasarımı oluşturulunca açılır
+MANTIKSAL = TEMEL + DOE
 DIZIN_SUTUN = ["Ad", "Aciklama", "Olusturma"] + MANTIKSAL
 EK = {"Yapilanma": "Yapi", "Veriler": "Veriler", "Tahminler": "Tahmin",
-      "Model_Durumu": "Model", "Etki_Analizi": "Etki"}
+      "Model_Durumu": "Model", "Etki_Analizi": "Etki", "DOE": "DOE", "DOE_Bilgi": "DOE_Bilgi"}
 ESKI_AD = "Ilk_calisma"
 
 
@@ -43,6 +47,9 @@ class Calisma:
 
     def ekle(self, k, satir):
         self.depo.ekle(self.sekme[k], satir)
+
+    def ekle_coklu(self, k, satirlar):
+        self.depo.ekle_coklu(self.sekme[k], satirlar)
 
     def url(self, k="Veriler"):
         return self.depo.url(self.sekme[k])
@@ -87,7 +94,8 @@ def oku(depo) -> list[dict]:
     if "Yapilanma" in sekmeler and len(depo.oku("Yapilanma")) >= 2:
         eski = {"Ad": ESKI_AD, "Aciklama": "Önceki sürümden aktarıldı",
                 "Olusturma": datetime.now().strftime("%d.%m.%Y")}
-        eski.update({k: k for k in MANTIKSAL})
+        eski.update({k: k for k in TEMEL})
+        eski.update({k: f"{ESKI_AD}_{EK[k]}" for k in DOE})
         yaz(depo, [eski])
         return [eski]
     return []
@@ -119,7 +127,7 @@ def olustur(depo, kayitlar, ad, aciklama="", yapi_rows=None, veri_rows=None) -> 
     depo.yaz(yeni["Yapilanma"], E.yapi_satirlari(yapi))
     depo.yaz(yeni["Veriler"], veri_rows or [baslik])
     for k in ("Tahminler", "Model_Durumu", "Etki_Analizi"):
-        depo.yaz(yeni[k], [])
+        depo.yaz(yeni[k], [])  # DOE sayfaları ilk tasarım oluşturulduğunda açılır
     kayitlar = kayitlar + [yeni]
     yaz(depo, kayitlar)
     return yeni

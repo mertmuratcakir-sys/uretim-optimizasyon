@@ -15,5 +15,9 @@ Operatör ayarlarını, ölçülen sonuçlardan öğrenerek hedeflere göre öne
 | `plots.py` | Grafikler ve sonuç tabloları |
 | `store.py` | Google Sheets / yerel depolama |
 | `calismalar.py` | Birden fazla çalışmanın sayfa yönetimi |
+| `doe_tasarim.py` | DOE tasarımları (faktöriyel, PB, CCD, BBD, DSD, Taguchi, karışım, D-optimal) |
+| `doe_analiz.py` | Minitab tarzı DOE analizi, Taguchi S/N, istenebilirlik optimizasyonu |
+| `doe_plots.py` | DOE grafikleri |
+| `doe_ui.py` | 🧪 DOE sekmesi |
 
 Kurulum: `KURULUM.md`

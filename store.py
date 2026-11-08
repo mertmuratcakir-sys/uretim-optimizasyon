@@ -82,6 +82,10 @@ class SheetsDepo:
     def ekle(self, ad, satir: list):
         self._sekme(ad).append_row(satir, value_input_option="USER_ENTERED")
 
+    def ekle_coklu(self, ad, satirlar: list[list]):
+        if satirlar:
+            self._sekme(ad).append_rows(satirlar, value_input_option="USER_ENTERED")
+
 
 class YerelDepo:
     tur = "Yerel dosya (deneme modu)"
@@ -131,6 +135,10 @@ class YerelDepo:
         rows = self.oku(ad)
         rows.append(satir)
         self.yaz(ad, rows)
+
+    def ekle_coklu(self, ad, satirlar):
+        rows = self.oku(ad)
+        self.yaz(ad, rows + [list(s) for s in satirlar])
 
 
 def depo_ac():

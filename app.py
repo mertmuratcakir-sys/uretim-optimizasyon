@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 import calismalar as CL
+import doe_ui as DU
 import engine as E
 import plots as G
 from store import depo_ac
@@ -132,7 +133,7 @@ def dizin(yenile=False):
 
 def yeni_durum():
     return {"kilit": threading.Lock(), "yapi": None, "df": None, "veri_rows": None,
-            "model": None, "guven": None, "etki": None, "log": ""}
+            "model": None, "guven": None, "etki": None, "log": "", "doe": None}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -156,7 +157,7 @@ OTURUM_ANAHTARLARI = ("sonuc", "uygula", "yapi_df", "yapi_editor")
 
 def oturum_temizle():
     for k in list(st.session_state.keys()):
-        if k in OTURUM_ANAHTARLARI or k.startswith(("t_", "v_")):
+        if k in OTURUM_ANAHTARLARI or k.startswith(("t_", "v_", "doe_")):
             del st.session_state[k]
 
 
@@ -195,6 +196,7 @@ def yukle():
     P["yapi"] = E.yapi_oku(DEPO.oku("Yapilanma"))
     P["veri_rows"] = DEPO.oku("Veriler")
     P["df"] = E.veri_oku(P["veri_rows"], P["yapi"])
+    P["doe"] = DU.yukle(DEPO)
 
 
 def egit_hepsi():
@@ -282,11 +284,15 @@ if DEPO is not None:
     st.markdown(durum + (f" · [📄 Sheets'te aç]({link})" if link else ""))
     if KAYIT.get("Aciklama"):
         st.caption(KAYIT["Aciklama"])
+    try:
+        DU.banner(st, P, YAPI)
+    except Exception:
+        pass
 else:
     st.info("Henüz çalışma yok. **🗂 Çalışmalar** sekmesinden ilk çalışmanızı oluşturun.")
 
-sek_oneri, sek_veri, sek_model, sek_etki, sek_yapi, sek_cal = st.tabs(
-    ["🎯 Öneri", "📝 Veri", "📊 Model", "🔍 Etki", "⚙️ Yapı", "🗂 Çalışmalar"])
+sek_oneri, sek_veri, sek_model, sek_etki, sek_doe, sek_yapi, sek_cal = st.tabs(
+    ["🎯 Öneri", "📝 Veri", "📊 Model", "🔍 Etki", "🧪 DOE", "⚙️ Yapı", "🗂 Çalışmalar"])
 
 # ════════════════════════════════════════════════════════════════
 # 1. Ayar önerisi
@@ -297,8 +303,20 @@ with sek_oneri:
     else:
         bekleyen = st.session_state.pop("uygula", None)
         if bekleyen:
-            for k, v in bekleyen.items():
-                st.session_state[f"t_{k}"] = float(v) if isinstance(v, (int, float)) else v
+            for g in YAPI["girdiler"]:
+                if g["isim"] not in bekleyen:
+                    continue
+                v = bekleyen[g["isim"]]
+                if g["tip"] == "nicel":
+                    v = E.sayi(v)
+                    if v is None:
+                        continue
+                    v = float(min(max(v, g["min"]), g["max"]))
+                else:
+                    v = str(v)
+                    if g["kategoriler"] and v not in g["kategoriler"]:
+                        continue
+                st.session_state[f"t_{g['isim']}"] = v
 
         st.write("Mevcut ayarları girip **Tahmin et**'e basın, ya da "
                  "**En iyi ayarı bul** ile hedeflere en yakın ayarı arayın.")
@@ -569,6 +587,10 @@ def yapi_kaydet(tablo, sifirla):
     st.session_state.pop("sonuc", None)
     return "\n\n".join(mesaj)
 
+
+with sek_doe:
+    DU.goster(st, {"P": P, "DEPO": DEPO, "YAPI": YAPI, "KAYIT": KAYIT,
+                   "egit": egit_hepsi, "yukle": yukle})
 
 with sek_yapi:
     bildir("yapi_mesaj")
