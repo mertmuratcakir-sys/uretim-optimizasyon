@@ -194,9 +194,17 @@ def kontur(s, x_ad, y_ad, sabit, hedef=None):
     cs = ax.contourf(XX, YY, Z, levels=14, cmap="viridis")
     ax.contour(XX, YY, Z, levels=14, colors="white", linewidths=0.4)
     fig.colorbar(cs, ax=ax, label=s["yanit"])
-    if hedef and hedef[0] is not None and hedef[1] is not None:
-        ax.contour(XX, YY, Z, levels=[hedef[0], hedef[1]], colors=KIRMIZI, linewidths=1.8)
-        ax.contourf(XX, YY, Z, levels=[hedef[0], hedef[1]], colors="none", hatches=["//"])
+    sev = []
+    if hedef:
+        sev = sorted({float(h) for h in hedef if h is not None and np.isfinite(float(h))})
+    zmin, zmax = np.nanmin(Z), np.nanmax(Z)
+    cizgi = [h for h in sev if zmin < h < zmax]
+    if cizgi:
+        ax.contour(XX, YY, Z, levels=cizgi, colors=KIRMIZI, linewidths=1.8)
+    if len(sev) == 2 and sev[0] < zmax and sev[1] > zmin:
+        ax.contourf(XX, YY, Z, levels=[max(sev[0], zmin), min(sev[1], zmax) + 1e-12],
+                    colors="none", hatches=["//"])
+    hedef = sev if len(sev) == 2 else None
     noktalar = [(r["deg"][x_ad], r["deg"][y_ad]) for r in s["satirlar"]]
     ax.scatter(*zip(*noktalar), s=12, color="white", edgecolor="black", lw=0.5, label="Deney noktaları")
     ax.set_xlabel(x_ad); ax.set_ylabel(y_ad)

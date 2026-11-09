@@ -499,7 +499,7 @@ def ozet_mesaj(t):
 # ════════════════════════════════════════════════════════════════
 # Otomatik uygulama: tüm nicel çıktıları analiz et + optimize et
 # ════════════════════════════════════════════════════════════════
-def uygula(aday, yapi, alfa=0.05):
+def uygula(aday, yapi, alfa=0.05, hiyerarsi=True):
     meta, sat = aday["meta"], aday["satirlar"]
     aile = A._aile(meta)
     ter = _terimler(meta, sat)
@@ -510,7 +510,7 @@ def uygula(aday, yapi, alfa=0.05):
             continue
         try:
             if aile in ("faktoriyel", "yuzey", "genel", "karisim") or meta["tip"] == "ozel":
-                s = A.geri_eleme(meta, sat, c["isim"], ter, alfa)
+                s = A.geri_eleme(meta, sat, c["isim"], ter, alfa, hiyerarsi=hiyerarsi)
             else:
                 s = A.analiz(meta, sat, c["isim"], ter, alfa)
             s["kaynak"] = "oto"
@@ -537,7 +537,8 @@ def uygula(aday, yapi, alfa=0.05):
     elif sonuclar:
         hatalar.append("Nicel çıktılar için ⚙️ Yapı'da Hedef_Min / Hedef_Max tanımlı değil — "
                        "optimizasyon atlandı.")
-    return {"aday": {k: aday[k] for k in ("kod", "ad", "ozet")}, "meta": meta, "sonuclar": sonuclar,
+    return {"aday": {k: aday[k] for k in ("kod", "ad", "ozet")}, "alfa": alfa, "hiyerarsi": hiyerarsi,
+            "meta": meta, "sonuclar": sonuclar,
             "taguchi": taguchi, "opt": opt, "hedefler": hedefler, "hatalar": hatalar}
 
 

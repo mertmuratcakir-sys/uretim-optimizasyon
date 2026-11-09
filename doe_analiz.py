@@ -515,46 +515,73 @@ def analiz(meta, satirlar, yanit, terimler, alfa=0.05):
     return sonuc
 
 
-def geri_eleme(meta, satirlar, yanit, terimler, alfa=0.05, adim_alfa=0.10):
-    """Hiyerarşiye uyan geri eleme (Minitab 'Backward elimination', α-çıkar = 0.10)."""
+def geri_eleme(meta, satirlar, yanit, terimler, alfa=0.05, adim_alfa=None, hiyerarsi=True):
+    """Adım adım geri eleme: her adımda p değeri en yüksek terimi çıkarır, modeli yeniden
+    kurar; kalan tüm terimler p ≤ α olana kadar sürer (Minitab 'Backward elimination').
+    hiyerarsi=True: daha yüksek dereceli bir terimde (ör. A*B) yer alan alt terim (A, B)
+    o terim modelde kaldıkça çıkarılmaz."""
+    adim_alfa = alfa if adim_alfa is None else adim_alfa
     terimler = list(terimler)
-    cikan = []
+    cikan, adimlar = [], []
+
+    def kayit(s, t, pv, neden):
+        o = s["ozet"]
+        adimlar.append({"Adım": len(adimlar) + 1, "Çıkarılan terim": terim_adi(t), "P": pv,
+                        "Neden": neden, "Kalan terim": len([x for x in terimler if x != (BLK,)]),
+                        "S": o["S"], "R-kare(düz) %": None if o["R-kare(düz)"] is None
+                        else 100 * o["R-kare(düz)"]})
+
     s = analiz(meta, satirlar, yanit, terimler, alfa)
+    # Doymuş model (hata SD'si yok): p hesaplanamaz → Lenth'e göre önemsiz terimler,
+    # en küçük etkiden başlayarak tek tek çıkarılır; sonra p değerine göre devam edilir.
     if s["dfE"] == 0 and s["lenth"]:
-        # Doymuş tasarım: Lenth'e göre önemsiz terimleri (hiyerarşiyi koruyarak) çıkar
         tk = s["lenth"]["t_kritik"]
-        onemli = {k["_terim"] for k in s["katsayi"] if k["_terim"] not in (None, (KTS,), (BLK,))
-                  and k["T"] is not None and abs(k["T"]) > tk}
-        gerekli = set(onemli)
-        for t in onemli:
-            for t2 in s["terimler"]:
-                if _icerir(t, t2):
-                    gerekli.add(t2)
-        for t in list(terimler):
-            if t not in ((KTS,), (BLK,)) and t not in gerekli:
-                terimler.remove(t)
-                cikan.append(terim_adi(t))
+        tl = {k["_terim"]: abs(k["T"]) for k in s["katsayi"]
+              if k.get("_terim") not in (None, (KTS,), (BLK,)) and k["T"] is not None}
+        while True:
+            aday = [(v, t) for t, v in tl.items() if t in terimler and v < tk and not (
+                hiyerarsi and any(t2 != t and t2 not in ((KTS,), (BLK,)) and _icerir(t2, t)
+                                  for t2 in terimler))]
+            if not aday:
+                break
+            tt, t = min(aday, key=lambda x: x[0])
+            terimler.remove(t)
+            cikan.append(terim_adi(t))
+            s = analiz(meta, satirlar, yanit, terimler, alfa)
+            kayit(s, t, None, f"doymuş model — en küçük etki (Lenth |t| = {tt:.2f} < {tk:.2f})")
     while True:
         s = analiz(meta, satirlar, yanit, terimler, alfa)
         if s["dfE"] <= 0:
             break
         aday = []
         for t, pv in s["terim_p"].items():
-            if t in ((BLK,),) or pv is None:
+            if t == (BLK,) or pv is None:
                 continue
-            gerekli = any(t2 != t and t2 not in ((KTS,), (BLK,)) and _icerir(t2, t)
-                          for t2 in s["terimler"])
-            if not gerekli and pv > adim_alfa:
+            if hiyerarsi and any(t2 != t and t2 not in ((KTS,), (BLK,)) and _icerir(t2, t)
+                                 for t2 in s["terimler"]):
+                continue
+            if pv > adim_alfa:
                 aday.append((pv, t))
         if not aday:
             break
-        _, t = max(aday)
+        pv, t = max(aday, key=lambda x: x[0])
         terimler.remove(t)
         cikan.append(terim_adi(t))
-        if len([t for t in terimler if t not in ((BLK,), (KTS,))]) <= 1:
+        s2 = analiz(meta, satirlar, yanit, terimler, alfa)
+        kayit(s2, t, pv, f"en yüksek p ({pv:.3f} > α = {adim_alfa:g})")
+        if len([x for x in terimler if x not in ((BLK,), (KTS,))]) <= 1:
             break
     s = analiz(meta, satirlar, yanit, terimler, alfa)
     s["cikarilan"] = cikan
+    s["adimlar"] = adimlar
+    s["eleme"] = {"alfa": adim_alfa, "hiyerarsi": hiyerarsi}
+    tutulan = [terim_adi(t) for t, pv in s["terim_p"].items()
+               if t != (BLK,) and pv is not None and pv > adim_alfa]
+    if tutulan:
+        s["mesajlar"].append(("info", "Hiyerarşi gereği p > α olduğu hâlde modelde tutulan terimler: "
+                              + ", ".join(tutulan) + " (anlamlı bir etkileşimin parçası oldukları için)."))
+    else:
+        s["mesajlar"].append(("success", f"Eleme tamamlandı: modelde kalan tüm terimler p ≤ {adim_alfa:g}."))
     return s
 
 
@@ -887,6 +914,7 @@ def optimize(sonuclar, hedefler, n=4000, tohum=1, sabit=None):
     sonuclar: {yanıt: analiz sonucu} (aynı tasarım)
     hedefler: {yanıt: (hedef_min, hedef_max)}
     """
+    hedefler = {y: tuple(sorted((float(h[0]), float(h[1])))) for y, h in hedefler.items()}
     ilk = next(iter(sonuclar.values()))
     meta = ilk["meta"]
     rng = np.random.default_rng(tohum)

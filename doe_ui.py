@@ -135,6 +135,24 @@ def ciz(st, fig):
         plt.close(fig)
 
 
+def _guvenli(st, fn, *a, **k):
+    """Grafik çizilemezse uygulama durmaz; kısa bir uyarı gösterilir."""
+    try:
+        ciz(st, fn(*a, **k))
+    except Exception as e:
+        plt.close("all")
+        st.caption(f"⚠️ Bu grafik çizilemedi ({type(e).__name__}: {str(e)[:120]}).")
+
+
+def _guvenli_liste(st, fn, *a, **k):
+    try:
+        return fn(*a, **k) or []
+    except Exception as e:
+        plt.close("all")
+        st.caption(f"⚠️ Grafik çizilemedi ({type(e).__name__}: {str(e)[:120]}).")
+        return []
+
+
 def _mesajlar(st, mesajlar):
     for tur, m in mesajlar:
         getattr(st, tur if tur in ("info", "warning", "success", "error") else "info")(m)
@@ -641,10 +659,20 @@ def _analiz(st, ctx):
         terimler = A.varsayilan_terimler(meta, model, blok_var=blok)
     yontem_ops = ["yok", "geri"] + (["ileri"] if aile in ("yuzey", "faktoriyel") else [])
     yontem = c2.radio("Terim seçimi", yontem_ops, key="doe_yontem",
-                      index=yontem_ops.index("ileri") if meta["tip"] == "dsd" else 0,
-                      format_func=lambda x: {"yok": "Tüm terimler", "geri": "Geri eleme (α çıkar 0.10)",
-                                             "ileri": "İleri seçim (α gir 0.05)"}[x])
-    alfa = float(c2.number_input("Anlamlılık düzeyi α", 0.01, 0.20, 0.05, 0.01, key="doe_alfa"))
+                      index=yontem_ops.index("ileri") if meta["tip"] == "dsd" else 1,
+                      format_func=lambda x: {"yok": "Tüm terimler (eleme yok)",
+                                             "geri": "Adım adım geri eleme (en yüksek p'yi çıkar)",
+                                             "ileri": "İleri seçim"}[x])
+    alfa = float(c2.number_input("Anlamlılık düzeyi α", 0.001, 0.30, 0.05, 0.01, format="%.3f",
+                                 key="doe_alfa",
+                                 help="Geri elemede p > α olan en yüksek p'li terim çıkarılır; "
+                                      "%95 güven için 0.05, %90 için 0.10."))
+    hiy = True
+    if yontem == "geri":
+        hiy = c2.checkbox("Hiyerarşiyi koru", True, key="doe_hiy",
+                          help="Açıkken anlamlı bir etkileşimde (ör. A*B) yer alan ana etki (A) "
+                               "p > α olsa da modelde kalır (Minitab varsayılanı). Kapalıyken "
+                               "her adımda kesinlikle en yüksek p'li terim çıkarılır.")
     adaylar = _aday_terimler(meta, sat)
     with st.expander("Terimleri elle seç (Minitab 'Terms')"):
         adlar = [A.terim_adi(t) for t in adaylar]
@@ -669,12 +697,12 @@ def _analiz(st, ctx):
     if st.button("📈 Analiz et", type="primary", key="doe_analiz"):
         try:
             if yontem == "geri":
-                s = A.geri_eleme(meta, sat, yanit, terimler, alfa)
+                s = A.geri_eleme(meta, sat, yanit, terimler, alfa, hiyerarsi=hiy)
             elif yontem == "ileri":
                 temel = [t for t in terimler if len(t) == 1]
                 aday = [t for t in terimler if len(t) > 1] or \
                        [t for t in adaylar if len(t) > 1 and t not in (( A.KTS,), (A.BLK,))]
-                s = A.ileri_secim(meta, sat, yanit, temel, aday, alfa)
+                s = A.ileri_secim(meta, sat, yanit, temel, aday, alfa, giris_alfa=alfa)
             else:
                 s = A.analiz(meta, sat, yanit, terimler, alfa)
             s["kaynak"] = kaynak
@@ -700,8 +728,17 @@ def _sonuc_goster(st, s, YAPI, on=""):
     meta = s["meta"]
     aile = A._aile(meta)
     st.markdown(f"### {s['yanit']} — {meta['ad']}")
-    if s.get("cikarilan"):
-        st.caption("Geri elemede çıkarılan terimler: " + ", ".join(s["cikarilan"]))
+    if s.get("eleme") is not None:
+        e = s["eleme"]
+        st.markdown(f"**Geri eleme adımları** (α = {e['alfa']:g}"
+                    + (", hiyerarşi korunuyor)" if e["hiyerarsi"] else ", hiyerarşisiz)"))
+        if s["adimlar"]:
+            st.dataframe(pd.DataFrame([{**r, "P": _f(r["P"], True), "S": _f(r["S"]),
+                                        "R-kare(düz) %": _f(r["R-kare(düz) %"])}
+                                       for r in s["adimlar"]]).astype(str),
+                         hide_index=True, use_container_width=True)
+        else:
+            st.caption(f"Çıkarılacak terim yok: başlangıç modelindeki tüm terimler p ≤ {e['alfa']:g}.")
     if s.get("eklenen") is not None:
         st.caption("İleri seçimde eklenen terimler: " + (", ".join(s["eklenen"]) or "yok"))
     _mesajlar(st, s["mesajlar"])
@@ -740,17 +777,17 @@ def _sonuc_goster(st, s, YAPI, on=""):
                      use_container_width=True)
         st.caption("R: büyük standart artık (|r| > 2) · X: yüksek kaldıraç")
     with st.expander("📊 Etki grafikleri (Pareto, normal)", expanded=aile == "faktoriyel"):
-        ciz(st, DP.pareto(s))
-        ciz(st, DP.normal_etki(s))
+        _guvenli(st, DP.pareto, s)
+        _guvenli(st, DP.normal_etki, s)
     with st.expander("📈 Ana etkiler ve etkileşimler"):
-        ciz(st, DP.ana_etki(meta, s["satirlar"], s["yanit"]))
-        ciz(st, DP.etkilesim(meta, s["satirlar"], s["yanit"]))
+        _guvenli(st, DP.ana_etki, meta, s["satirlar"], s["yanit"])
+        _guvenli(st, DP.etkilesim, meta, s["satirlar"], s["yanit"])
     with st.expander("🔍 Artık grafikleri (4'ü 1 arada)"):
-        ciz(st, DP.artik4(s))
+        _guvenli(st, DP.artik4, s)
     surekli = [f for f in meta["faktorler"] if not A._kategorik(meta, f)]
     if meta["tip"] == "karisim" and len(meta["faktorler"]) == 3:
         with st.expander("🔺 Karışım kontur grafiği"):
-            ciz(st, DP.karisim_ucgen(s))
+            _guvenli(st, DP.karisim_ucgen, s)
     elif len(surekli) >= 2 and meta["tip"] != "karisim":
         with st.expander("🗺 Kontur ve yüzey grafikleri"):
             adlar = [f["isim"] for f in surekli]
@@ -769,8 +806,8 @@ def _sonuc_goster(st, s, YAPI, on=""):
                     sabit[f["isim"]] = f["merkez"]
             hedef = next(((c.get("hedef_min"), c.get("hedef_max")) for c in YAPI["ciktilar"]
                           if c["isim"] == s["yanit"]), None)
-            ciz(st, DP.kontur(s, x, y, sabit, hedef))
-            ciz(st, DP.yuzey(s, x, y, sabit))
+            _guvenli(st, DP.kontur, s, x, y, sabit, hedef)
+            _guvenli(st, DP.yuzey, s, x, y, sabit)
 
 
 def _taguchi(st, meta, sat, nicel_c):
@@ -810,7 +847,7 @@ def _taguchi(st, meta, sat, nicel_c):
     st.session_state["doe_tg_oneri"] = {**{k: (float(v) if isinstance(v, (int, float)) else v)
                                            for k, v in ta["en_iyi"].items()},
                                         **meta.get("sabitler", {})}
-    for fig in DP.taguchi_grafik(ta):
+    for fig in _guvenli_liste(st, DP.taguchi_grafik, ta):
         ciz(st, fig)
     # S/N için doğrusal model (ANOVA)
     sn_sat = [{"StdOrder": i + 1, "RunOrder": i + 1, "pt": 1, "blok": 1, "deg": k["deg"],
@@ -915,7 +952,9 @@ def tani_al(P, YAPI):
 
 def _oto_calistir(st, YAPI, aday):
     with st.spinner(f"{aday['ad']} uygulanıyor..."):
-        st.session_state["doe_oto"] = DT.uygula(aday, YAPI)
+        st.session_state["doe_oto"] = DT.uygula(
+            aday, YAPI, alfa=float(st.session_state.get("doe_oto_alfa", 0.05)),
+            hiyerarsi=bool(st.session_state.get("doe_oto_hiy", True)))
     st.session_state["doe_acik"] = True
     st.session_state["doe_mesaj"] = (f"✅ {aday['ad']} kayıtlı verilere uygulandı — sonuçlar "
                                      "**🧪 DOE → 🤖 Otomatik** sekmesinde.")
@@ -961,6 +1000,13 @@ def kenar(st, P, YAPI):
         if t["sabitler"]:
             st.caption("Sabit kalan girdiler: " + ", ".join(f"{k} = {A.seviye_yaz(v)}"
                                                             for k, v in t["sabitler"].items()))
+        if uy:
+            st.number_input("Anlamlılık düzeyi α (geri eleme)", 0.001, 0.30, 0.05, 0.01,
+                            format="%.3f", key="doe_oto_alfa",
+                            help="Her adımda p değeri en yüksek terim çıkarılır; kalan tüm "
+                                 "terimler p ≤ α olunca durulur.")
+            st.checkbox("Hiyerarşiyi koru", True, key="doe_oto_hiy",
+                        help="Anlamlı bir etkileşimin ana etkileri modelde tutulur (Minitab varsayılanı).")
         for a in uy:
             st.divider()
             _aday_satiri(st, a, "doe_k", YAPI)
@@ -1019,7 +1065,8 @@ def _otomatik(st, ctx):
     st.divider()
     meta = o["meta"]
     st.markdown(f"## {o['aday']['ad']}")
-    st.caption(f"{o['aday']['ozet']} · kaynak: Veriler sayfası"
+    st.caption(f"{o['aday']['ozet']} · kaynak: Veriler sayfası · geri eleme α = {o.get('alfa', 0.05):g}"
+               + ("" if o.get("hiyerarsi", True) else " (hiyerarşisiz)")
                + (" · sabit: " + ", ".join(f"{k} = {A.seviye_yaz(v)}" for k, v in meta["sabitler"].items())
                   if meta.get("sabitler") else ""))
     for h in o["hatalar"]:
@@ -1053,7 +1100,7 @@ def _otomatik(st, ctx):
         st.info("S/N'yi en büyükleyen seviyeler: "
                 + ", ".join(f"{k} = {A.seviye_yaz(v)}" for k, v in ta["en_iyi"].items())
                 + f" → tahmini ortalama {ta['tahmin']['Ort']:.4g}")
-        for fig in DP.taguchi_grafik(ta):
+        for fig in _guvenli_liste(st, DP.taguchi_grafik, ta):
             ciz(st, fig)
     if o["sonuclar"]:
         st.markdown("### Analiz sonuçları")
